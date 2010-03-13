@@ -93,15 +93,33 @@ chroot $imagedir apt-get install -y ec2-ami-tools
 #Install Chef
 chroot $imagedir apt-get install -y ruby ruby1.8-dev libopenssl-ruby1.8 rdoc ri irb build-essential wget ssl-cert
 
-#TODO: this stuff needs to run in chroot
-cd /tmp
+echo "deb http://apt.opscode.com/ karmic universe" |
+  sudo tee $imagedir/etc/apt/sources.list.d/opscode.list
+
+# Install rubygems from source
 wget http://rubyforge.org/frs/download.php/69365/rubygems-1.3.6.tgz
 tar zxf rubygems-1.3.6.tgz
-cd rubygems-1.3.6
-sudo ruby setup.rb
-sudo ln -sfv /usr/bin/gem1.8 /usr/bin/gem
+sudo mv rubygems-1.3.6 $imagedir
+chroot $imagedir sudo ruby rubygems-1.3.6/setup.rb
+chroot $imagedir sudo ln -sfv /usr/bin/gem1.8 /usr/bin/gem
+sudo rm -rf $imagedir/rubygems-1.3.6
 
+# Install chef
 chroot $imagedir sudo gem install chef --no-ri --no-rdoc
+
+# Grab latest cookbooks and rebuild the tar.gz to have a cookbooks prefix
+wget -O- http://github.com/mikehale/cookbooks/tarball/master > cookbooks.tar.gz
+  tar zxf $imagedir/cookbooks.tar.gz &&
+  mv mikehale-cookbooks* cookbooks &&
+  tar -zcf cookbooks.tar.gz cookbooks &&
+  rm -rf cookbooks &&
+  sudo mv cookbooks.tar.gz $imagedir/cookbooks.tar.gz
+
+# Create json
+echo '{ "recipes": ["bootstrap::solo"] }' | sudo tee $imagedir/bootstrap.json
+
+# Bootstrap chef solo
+chroot $imagedir sudo chef-solo -r cookbooks.tar.gz -j bootstrap.json
 EOM
 chmod 755 setup-server
 
@@ -137,10 +155,16 @@ Mixlib::Log::Formatter.show_time = true
 EOM
 
 sudo mkdir -p $imagedir/etc/chef
+sudo mkdir -p $imagedir/var/log/chef
 sudo mv solo.rb $imagedir/etc/chef/
 
 #create init.d script that runs chef-solo against a url as a daemon
 # sudo chef-solo -r `cat /etc/chef/cookbooks_url` -d
+# runit example:
+# #!/bin/bash
+# exec 2>&1
+# exec /usr/bin/env chef-solo -i 1800 -s 20 -L /var/log/chef/solo.log -r `cat /etc/chef/cookbooks_url`
+# sudo chmod a+x $imagedir/etc/sv/chef-solo
 
 /usr/bin/ruby -e "\
   require 'rubygems'; require 'json' ; require 'open-uri';\
