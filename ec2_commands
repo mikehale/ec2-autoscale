@@ -1,0 +1,82 @@
+# http://alestic.com/2009/06/ec2-user-data-scripts
+# https://help.ubuntu.com/community/EC2StartersGuide
+# http://www.codebelay.com/blog/2009/08/02/how-to-load-balance-and-auto-scale-with-amazons-ec2/
+# http://alestic.com/2009/08/runurl
+# http://thecloudmarket.com/image/ami-258c634c--chef-0-8-4-client1-ubuntu-9-10
+# http://alestic.com/2009/06/ec2-ami-bundle
+# https://wiki.ubuntu.com/EC2Vmbuilder
+
+# install the ec2 tools
+brew install ec2-api-tools auto-scaling cloud-watch elastic-load-balancing
+
+ec2-add-keypair ec2-keypair > ~/.ec2/ec2-keypair.pem
+chmod 600 ~/.ec2/ec2-keypair.pem
+
+# add this to your .ssh/config
+  Host *.amazonaws.com
+    IdentityFile ~/.ec2/ec2-keypair.pem
+    User ubuntu
+    UserKnownHostsFile /dev/null
+    StrictHostKeyChecking no
+
+# allow ssh and http
+ec2-authorize default -p 22 -p 80
+
+# create a file named user_data.sh with these contents:
+#!/bin/bash
+set -e -x
+wget -O- run.alestic.com/install/runurl | bash
+runurl https://s3.amazonaws.com/resources.<your domain>/apache2
+echo "appserver" > /etc/instance-role
+
+# create an S3 bucket named resources.<your domain>
+# create a file named apache2 in that bucket with the contents:
+sudo apt-get install apache2 -y
+
+# create a small instance based on the ubuntu 32bit karmic ami
+instanceid=$(ec2-run-instances   \
+  --user-data-file user_data.sh  \
+  --key mikehale                 \
+  --instance-type m1.small       \
+  ami-bb709dd2 |
+  egrep ^INSTANCE | cut -f2)
+echo "instanceid=$instanceid"
+
+# get the instance public dns name
+while host=$(ec2-describe-instances "$instanceid" | 
+  egrep ^INSTANCE | cut -f4) && test -z $host; do echo -n .; sleep 1; done
+echo host=$host
+
+
+# open ec2*.amazonaws.com in your browser you should see the default apache page for ubuntu with something like "It Works!"
+
+# don't forget to terminate your instance(s)
+ec2-terminate-instances 
+
+elb-create-lb appserver_loadbalancer --headers \
+--listener "lb-port=80,instance-port=80,protocol=http" \
+--availability-zones us-east-1a
+
+elb-configure-healthcheck appserver_loadbalancer --headers \
+--target "HTTP:80/index.html" --interval 30 --timeout 3 \
+--unhealthy-threshold 2 --healthy-threshold 2
+
+as-create-launch-config appserver_config --image-id ami-258c634c \
+--instance-type m1.small --key mikehale
+
+as-create-auto-scaling-group appserver_group  \
+--launch-configuration appserver_config \
+--availability-zones us-east-1a \
+--min-size 0 --max-size 1 \
+--load-balancers appserver_loadbalancer
+
+as-create-or-update-trigger appserver_trigger \
+--auto-scaling-group appserver_group --namespace "AWS/EC2" \
+--measure CPUUtlization --statistic Average \
+--dimensions "AutoScalingGroupName=appserver_group" \
+--period 60 --lower-threshold 20 --upper-threshold 40 \
+--lower-breach-increment=-1 --upper-breach-increment 1 \
+--breach-duration 120
+
+# clone drive with uuid to file
+# VBoxManage -q clonehd f4526744-9a21-4778-91a2-accfbca4a174 /Users/mikehale/Library/VirtualBox/HardDisks/vagrantbase2.vmdk --format true --remember
