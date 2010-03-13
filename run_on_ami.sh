@@ -139,7 +139,6 @@ sudo vmbuilder xen ubuntu                 \
   $pkgopts                                \
   --execscript ./setup-server             \
   --debug                                 \
-  --verbose                               \
   --ec2-bundle                            \
   --ec2-upload                            \
   --ec2-register                          \
