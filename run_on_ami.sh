@@ -4,8 +4,7 @@ echo "deb http://ppa.launchpad.net/ubuntu-on-ec2/ec2-tools/ubuntu karmic main" |
 sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 9EE6D873 &&
 sudo apt-get update &&
 sudo -E apt-get upgrade -y &&
-sudo -E apt-get install -y \
-  python-vm-builder ec2-ami-tools ec2-api-tools bzr python-vm-builder-ec2
+sudo -E apt-get install -y python-vm-builder-ec2
 
 source /mnt/access_keys
 export EC2_CERT=$(echo /mnt/cert-*.pem)
@@ -66,6 +65,7 @@ imagedir=$1
 # fix what I consider to be bugs in vmbuilder
 perl -pi -e "s%^127.0.1.1.*\n%%" $imagedir/etc/hosts
 rm -f $imagedir/etc/hostname
+
 # Use multiverse
 perl -pi -e 's%(universe)$%$1 multiverse%' \
   $imagedir/etc/ec2-init/templates/sources.list.tmpl
@@ -79,19 +79,84 @@ echo "deb http://ppa.launchpad.net/ubuntu-on-ec2/ec2-tools/ubuntu karmic main" |
   sudo tee $imagedir/etc/apt/sources.list.d/ubuntu-on-ec2-ec2-tools.list
 chroot $imagedir \
   sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 9EE6D873
+# Add Opscode PPA
+echo "deb http://apt.opscode.com/ karmic universe" |
+  sudo tee $imagedir/etc/apt/sources.list.d/opscode.list
+chroot $imagedir \
+  curl http://apt.opscode.com/packages@opscode.com.gpg.key | sudo apt-key add -
+
 # Install packages
 chroot $imagedir apt-get update
 chroot $imagedir apt-get install -y runurl
 chroot $imagedir apt-get install -y ec2-ami-tools
+
+#Install Chef
+chroot $imagedir apt-get install -y ruby ruby1.8-dev libopenssl-ruby1.8 rdoc ri irb build-essential wget ssl-cert
+
+#TODO: this stuff needs to run in chroot
+cd /tmp
+wget http://rubyforge.org/frs/download.php/69365/rubygems-1.3.6.tgz
+tar zxf rubygems-1.3.6.tgz
+cd rubygems-1.3.6
+sudo ruby setup.rb
+sudo ln -sfv /usr/bin/gem1.8 /usr/bin/gem
+
+chroot $imagedir sudo gem install chef --no-ri --no-rdoc
 EOM
 chmod 755 setup-server
 
+cat > solo.rb <<'EOM'
+# Chef Client Config File
+# Automatically grabs configuration from ohai ec2 metadata.
+
+require 'ohai'
+require 'json'
+
+o = Ohai::System.new
+o.all_plugins
+chef_config = JSON.parse(o[:ec2][:userdata] || "{}")
+if chef_config.kind_of?(Array)
+  chef_config = chef_config[o[:ec2][:ami_launch_index]]
+end
+
+log_level        :info
+log_location     STDOUT
+node_name        o[:ec2][:instance_id]
+
+if chef_config.has_key?("attributes")
+  File.open("/etc/chef/client-config.json", "w") do |f|
+    f.print(JSON.pretty_generate(chef_config["attributes"]))
+  end
+  json_attribs "/etc/chef/client-config.json"
+end
+
+file_cache_path    "/var/chef"
+cookbook_path      ["/var/chef/site-cookbooks", "/var/chef/cookbooks"]
+
+Mixlib::Log::Formatter.show_time = true
+EOM
+
+sudo mkdir -p $imagedir/etc/chef
+sudo mv solo.rb $imagedir/etc/chef/
+
+#create init.d script that runs chef-solo against a url as a daemon
+# sudo chef-solo -r `cat /etc/chef/cookbooks_url` -d
+
+/usr/bin/ruby -e "\
+  require 'rubygems'; require 'json' ; require 'open-uri';\
+  userdata = nil;\
+  begin;\
+    userdata = JSON.parse(open('http://169.254.169.254/2009-04-04/user-data').read);\
+  rescue OpenURI::HTTPError; end;\
+  print userdata['recipes_url'] if userdata && userdata.has_key?('recipes_url')
+" > cookbooks_url
+sudo mv cookbooks_url $imagedir/etc/chef/
 
 now=$(date +%Y%m%d-%H%M)
 dest=/mnt/dest-$codename-$now
 prefix=ubuntu-$release-$codename-$arch-$tag-$now
 description="Ubuntu $release $codename $arch $tag $now"
-sudo vmbuilder xen ubuntu       \
+sudo vmbuilder xen ubuntu                 \
   --suite=$codename                       \
   --arch=$arch2                           \
   --dest=$dest                            \
