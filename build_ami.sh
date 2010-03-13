@@ -22,3 +22,6 @@ rsync -a                                \
   $host:/mnt/
 
 ssh $host /mnt/run_on_ami.sh
+
+#terminate instance
+ec2-terminate-instances $instanceid
